@@ -2,6 +2,12 @@
 
 #include <Limelight.h>
 
+namespace {
+constexpr int kRemoteAudioBufferMs = 60;
+constexpr int kRemotePendingAudioLimitMs = 90;
+constexpr int kRemoteSdlQueueLimitMs = 90;
+}
+
 SdlAudioRenderer::SdlAudioRenderer()
     : m_AudioDevice(0),
       m_AudioBuffer(nullptr)
@@ -30,7 +36,7 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
     // to mitigate this issue. Otherwise, we will buffer up to 3 frames of audio which
     // is 15 ms at regular 5 ms frames and 30 ms at 10 ms frames for slow connections.
     // The buffering helps avoid audio underruns due to network jitter.
-    want.samples = SDL_max(480, opusConfig->samplesPerFrame * 3);
+    want.samples = SDL_max(480, opusConfig->sampleRate * kRemoteAudioBufferMs / 1000);
 
     m_FrameDurationMs = opusConfig->samplesPerFrame / (opusConfig->sampleRate / 1000);
     m_FrameSize = opusConfig->samplesPerFrame *
@@ -51,6 +57,12 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
                      "Failed to allocate audio buffer");
         return false;
     }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Remote audio profile: device target %d ms; pending/SDL queue limits %d/%d ms",
+                kRemoteAudioBufferMs,
+                kRemotePendingAudioLimitMs,
+                kRemoteSdlQueueLimitMs);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Desired audio buffer: %u samples (%u bytes)",
@@ -100,9 +112,8 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
         return true;
     }
 
-    // Don't queue if there's already more than 30 ms of audio data waiting
-    // in Moonlight's audio queue.
-    if (LiGetPendingAudioDuration() > 30) {
+    // Retain enough decoded audio to cover ordinary remote-network jitter.
+    if (LiGetPendingAudioDuration() > kRemotePendingAudioLimitMs) {
         return true;
     }
 
@@ -116,8 +127,8 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
             return false;
         }
 
-        // Only queue more samples where there is 50 ms or less in SDL's queue
-        if (SDL_GetQueuedAudioSize(m_AudioDevice) / m_FrameSize * m_FrameDurationMs <= 50) {
+        // Keep a bounded audio lead for the remote profile.
+        if (SDL_GetQueuedAudioSize(m_AudioDevice) / m_FrameSize * m_FrameDurationMs <= kRemoteSdlQueueLimitMs) {
             break;
         }
 
